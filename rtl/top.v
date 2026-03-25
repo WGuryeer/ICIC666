@@ -33,14 +33,12 @@ module top(
     output reg  [7:0]  g_out,
     output reg  [7:0]  b_out,
 
-    // 灰度化输出，供算法管线使用
-    output             vs_gray,
-    output             hs_gray,
-    output             de_gray,
-    output      [7:0]  gray_out,
-
     output             led_int     // 指示初始化完成
 );
+
+    // 灰度化内部信号（不暴露为顶层端口）
+    wire        vs_gray, hs_gray, de_gray;
+    wire [7:0]  gray_out;
 
     // === 1080p 时序参数（备用/留作扩展） ===
     parameter V_TOTAL  = 12'd1125;
