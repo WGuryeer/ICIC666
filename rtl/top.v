@@ -73,22 +73,32 @@ module top(
     end
     assign rstn_out = (rstn_1ms == 16'h2710);
 
-    // === MS72xx 初始化控制 ===
-    wire init_over;  // 初始化完成标志
+    // === MS72xx 初始化控制（cfg_clk 域） ===
+    wire init_over_cfg;  // 在 cfg_clk 域产生
     ms72xx_ctl u_ms72xx_ctl (
         .clk        (cfg_clk),
         .rst_n      (rstn_out),
-        .init_over  (init_over),
+        .init_over  (init_over_cfg),
         .iic_tx_scl (iic_tx_scl),
         .iic_tx_sda (iic_tx_sda),
         .iic_scl    (iic_scl),
         .iic_sda    (iic_sda)
     );
 
-    assign led_int   = init_over;
-    assign pixclk_out = pixclk_in; // 像素时钟透传
+    // === init_over 跨域同步到像素域 pixclk_out ===
+    // 目的：避免将 cfg_clk 域信号直接用于像素域导致亚稳态
+    reg init_sync1, init_sync2;
+    always @(posedge pixclk_out) begin
+        init_sync1 <= init_over_cfg;
+        init_sync2 <= init_sync1;
+    end
+    wire init_over = init_sync2;
 
-    // === RGB 透传：init_over 前拉低 ===
+    assign led_int    = init_over_cfg; // LED 仍用原域信号即可
+    assign pixclk_out = pixclk_in;     // 像素时钟透传
+	
+	/*
+    // === RGB 透传===（原）
     always @(posedge pixclk_out) begin
         if(!init_over) begin
             vs_out <= 1'b0;
@@ -104,6 +114,26 @@ module top(
             r_out  <= r_in;
             g_out  <= g_in;
             b_out  <= b_in;
+        end
+    end
+	*/
+	// === RGB 透传改为灰度显示（调试用） ===
+    always @(posedge pixclk_out) begin
+        if(!init_over) begin
+            vs_out <= 1'b0;
+            hs_out <= 1'b0;
+            de_out <= 1'b0;
+            r_out  <= 8'd0;
+            g_out  <= 8'd0;
+            b_out  <= 8'd0;
+        end else begin
+            // 使用灰度同步信号和数据，确保相位对齐
+            vs_out <= vs_gray;
+            hs_out <= hs_gray;
+            de_out <= de_gray;
+            r_out  <= gray_out;
+            g_out  <= gray_out;
+            b_out  <= gray_out;
         end
     end
 
@@ -133,7 +163,10 @@ module top(
         .gray_out(gray_out)
     );
 
-	
+
+
+
+	/*
     // === 二阶 3×3 高斯（替换原先的 5×5）===
     gaussian_3x3_2nd #(
         .DATA_W   (8),
@@ -182,4 +215,31 @@ module top(
     );
     // 后续形态学/阈值处理可使用 sobel_disp 或 gx_abs
 
+	// === 二值化：阈值 40，对应 suanfa 的 threshold(morph_src,40,255) ===
+    wire vs_bin, hs_bin, de_bin;
+    wire edge_mask;
+    wire [7:0] edge_mask_255;
+
+    bin_thresh #(
+        .THRESH (8'd40),
+        .HI_VAL (8'hFF)
+    ) u_bin_thresh (
+        .clk      (pixclk_out),
+        .rst_n    (init_over),
+        .vs_in    (vs_sobel),    // 或者用再高斯后的 vs_morph
+        .hs_in    (hs_sobel),
+        .de_in    (de_sobel),
+        .din      (sobel_disp),  // |Gx| 归一化到 0~255 的 8bit
+        .vs_out   (vs_bin),
+        .hs_out   (hs_bin),
+        .de_out   (de_bin),
+        .dout_bin (edge_mask),     // 1bit 掩码
+        .dout_gray(edge_mask_255)  // 0/255 图，供形态学膨胀/腐蚀
+    );
+    
+	
+	
+	
+	*/
+	
 endmodule
