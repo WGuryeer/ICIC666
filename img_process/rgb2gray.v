@@ -1,52 +1,87 @@
 `timescale 1ns/1ps
-// 功能：将输入的 RGB888 流转换为灰度流，保持行场同步信号对齐。
-// 公式：Gray = 0.299*R + 0.587*G + 0.114*B
-// 实现：用整数近似系数 77/256, 150/256, 29/256，乘法后右移 8 位（等价除以 256）。
+// ============================================================================
+// 功能：RGB565 → 灰度，心理学公式近似：Gray = (38*R + 75*G + 15*B) >> 7
+// 时序：输入同步信号与像素在 clk 上升沿采样，内部两级运算流水，输出整体延迟 3 拍
+// 端口说明：
+// clk      : 像素时钟，与输入数据同域
+// rst_n    : 同步低有效复位
+// vs_in    : 场同步输入
+// hs_in    : 行同步输入
+// de_in    : 数据有效（Data Enable）输入
+// rgb565_in: 打包好的 RGB565 输入（如 hdmi_data_in）
+// vs_out/hs_out/de_out : 输出同步信号，较输入延迟 3 拍，与灰度数据对齐
+// gray_out : 灰度输出，8bit，(38*R+75*G+15*B)>>7 截断
+// ============================================================================
 module rgb2gray #(
-    parameter IN_WIDTH  = 8,  // 输入每通道位宽，默认 8bit
-    parameter OUT_WIDTH = 8   // 输出灰度位宽，默认 8bit
+    parameter OUT_WIDTH = 8
 )(
-    input  wire                 clk,     // 像素时钟，与输入数据同域
-    input  wire                 rst_n,   // 同步低有效复位
+    input  wire                 clk,
+    input  wire                 rst_n,
+    input  wire                 vs_in,
+    input  wire                 hs_in,
+    input  wire                 de_in,
+    input  wire [15:0]          rgb565_in,
 
-    // 输入：行场同步与有效信号 + RGB 数据
-    input  wire                 vs_in,   // 场同步（frame/field sync）
-    input  wire                 hs_in,   // 行同步（line sync）
-    input  wire                 de_in,   // 数据有效（Data Enable）
-    input  wire [IN_WIDTH-1:0]  r_in,    // Red  通道
-    input  wire [IN_WIDTH-1:0]  g_in,    // Green通道
-    input  wire [IN_WIDTH-1:0]  b_in,    // Blue 通道
-
-    // 输出：与输入同步对齐的行场/有效 + 灰度数据
     output reg                  vs_out,
     output reg                  hs_out,
     output reg                  de_out,
-    output reg  [OUT_WIDTH-1:0] gray_out // 灰度值
+    output reg  [OUT_WIDTH-1:0] gray_out
 );
-    // ---------------------- 乘法与加权 ----------------------
-    // 乘法结果宽度：8bit * 8bit = 16bit，防止溢出
-    // 系数选取：0.299≈77/256, 0.587≈150/256, 0.114≈29/256
-    wire [15:0] mult_r = r_in * 8'd77;   // 77 * R
-    wire [15:0] mult_g = g_in * 8'd150;  // 150 * G
-    wire [15:0] mult_b = b_in * 8'd29;   // 29 * B
+    // ---------- RGB565→RGB888 量化补偿 ----------
+    // 高位补齐，低位重复高位的 MSB，减少阶梯感
+    wire [7:0] r = {rgb565_in[15:11], rgb565_in[13:11]};
+    wire [7:0] g = {rgb565_in[10:5],  rgb565_in[6:5]};
+    wire [7:0] b = {rgb565_in[4:0],   rgb565_in[2:0]};
 
-    // 求和后右移 8 位，相当于除以 256，实现灰度加权平均
-    wire [17:0] sum  = mult_r + mult_g + mult_b; // 最大值 255*150*3 ≈ 114k，18 位足够
-    wire [7:0]  gray = sum[15:8];                // 取高 8 位，相当于 sum >> 8
+    // ---------- 有效与同步信号打拍（3 拍，与灰度流水对齐） ----------
+    reg [2:0] vs_r, hs_r, de_r;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            vs_r <= 3'b0;
+            hs_r <= 3'b0;
+            de_r <= 3'b0;
+        end else begin
+            vs_r <= {vs_r[1:0], vs_in};
+            hs_r <= {hs_r[1:0], hs_in};
+            de_r <= {de_r[1:0], de_in};
+        end
+    end
 
-    // ---------------------- 时序与复位 ----------------------
-    always @(posedge clk) begin
-        if(!rst_n) begin
+    // ---------- 7 位精度灰度运算，流水 2 拍 ----------
+    // 第 1 拍：常数乘法
+    reg [14:0] r_u, g_u, b_u;   // 38*R, 75*G, 15*B
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            r_u <= 15'd0; g_u <= 15'd0; b_u <= 15'd0;
+        end else if (de_r[0]) begin
+            r_u <= r * 7'd38;
+            g_u <= g * 7'd75;
+            b_u <= b * 7'd15;
+        end
+    end
+
+    // 第 2 拍：加法求和
+    reg [14:0] sum_u;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sum_u <= 15'd0;
+        end else if (de_r[1]) begin
+            sum_u <= r_u + g_u + b_u;   // 最大约 32640，15 位足够
+        end
+    end
+
+    // ---------- 第 3 拍：输出寄存，对齐同步 ----------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            gray_out <= {OUT_WIDTH{1'b0}};
             vs_out   <= 1'b0;
             hs_out   <= 1'b0;
             de_out   <= 1'b0;
-            gray_out <= {OUT_WIDTH{1'b0}};
         end else begin
-            // 将同步信号一拍延迟，与灰度数据保持对齐
-            vs_out   <= vs_in;
-            hs_out   <= hs_in;
-            de_out   <= de_in;
-            gray_out <= gray;  // 灰度输出
+            gray_out <= sum_u[7 +: 8]; // (sum >> 7) 截断；若要四舍五入，可改为 (sum_u + 15'd64)[7+:8]
+            vs_out   <= vs_r[2];
+            hs_out   <= hs_r[2];
+            de_out   <= de_r[2];
         end
     end
 endmodule
