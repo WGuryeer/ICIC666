@@ -118,7 +118,7 @@ always @(posedge video_clk or negedge rst_n) begin
         {matrix21,matrix22,matrix23,matrix24} <= 4'd0;
         {matrix31,matrix32,matrix33,matrix34} <= 4'd0;
         {matrix41,matrix42,matrix43,matrix44} <= 4'd0;
-    end else if (de_d0) begin
+    end else if (video_de_d0) begin
         {matrix11,matrix12,matrix13,matrix14} <= {matrix12,matrix13,matrix14,line1_data};
         {matrix21,matrix22,matrix23,matrix24} <= {matrix22,matrix23,matrix24,line2_data};
         {matrix31,matrix32,matrix33,matrix34} <= {matrix32,matrix33,matrix34,line3_data};
